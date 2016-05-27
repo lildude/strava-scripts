@@ -1,0 +1,70 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'bundler/setup'
+require 'strava/api/v3'
+require 'yaml'
+require 'optparse'
+
+options = {}
+optparse = OptionParser.new do |opts|
+  opts.banner = "Usage: dup_and_delete [options]"
+
+  opts.on("-a", "--activity ID", Integer, "Activity ID to duplicate") { |v| options[:activity_id] = v }
+  opts.on("-d", "--distance DIST", Float, "New distance for duplicate activity") { |v| options[:distance] = v }
+  opts.on("-v", "--verbose", "Verbose output") { |v| options[:verbose] = v }
+
+end
+
+optparse.parse!
+
+# Exit if required opts aren't set.
+puts optparse unless options[:activity_id] and options[:distance]
+
+# Load our config file.
+config = YAML.load_file('_config.yml')
+
+# Hide all debug info unless the -v or --verbose flags are passed.
+logger = nil
+unless options[:verbose]
+  logger = Logger.new(STDOUT)
+  logger.sev_threshold = Logger::WARN
+end
+
+@client = Strava::Api::V3::Client.new(:access_token => config['strava_auth_token'], :logger => logger)
+
+original_activity = @client.retrieve_an_activity(options[:activity_id])
+
+new_activity = {
+  :name => original_activity["name"],
+  :type => original_activity["type"],
+  :start_date_local => original_activity["start_date_local"], # datetime required ISO 8601 formatted date time, see Dates for more information
+  :elapsed_time => original_activity["moving_time"], # Manual entries have elased == moving times
+  :description => original_activity["description"], #string optional
+  :distance => options[:distance], #float optional meters
+  :private => original_activity["private"], #integer optional set to 1 to mark the resulting activity as private, ‘view_private’ permissions will be necessary to view the activity
+  :trainer => original_activity["trainer"], #integer optional set to 1 to mark as a trainer activity
+  :commute => original_activity["commute"], #integer optional set to 1 to mark as commute
+}
+
+result = @client.api_call("activities", new_activity, 'post')
+
+if result
+  # Double-check that all fields do actually match:
+  mismatch = []
+  ["name", "type", "start_date_local", "elapsed_time", "description", "private", "trainer", "commute"].each do |field|
+    if field == "elapsed_time"
+      mismatch << "!! Original moving_time: #{original_activity["moving_time"]} != New #{field}: #{result[field]}" unless original_activity["moving_time"] == result[field]
+    else
+      mismatch << "!! Original #{field}: #{original_activity[field]} != New #{field}: #{result[field]}" unless original_activity[field] == result[field]
+    end
+  end
+
+  if mismatch.empty?
+    puts "Activity #{options[:activity_id]} successfully duplicated to #{result["id"]}.\nDeleting #{options[:activity_id]} ..."
+    @client.api_call("activities/#{options[:activity_id]}", {}, 'delete')
+    puts "Activity #{options[:activity_id]} successfully deleted."
+  else
+    puts mismatch
+  end
+end
